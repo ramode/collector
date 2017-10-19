@@ -5,13 +5,13 @@
 
 #include <uv.h>
 
+#include <libpq-fe.h>
+
 #define DEBUG
 #define NETFLOW5 5
-
+#define BUFFER_SIZE 256
 
 typedef struct {
-//	uint64_t srcmac;
-//	uint64_t dstmac;
 	uint32_t srcaddr;
 	uint32_t dstaddr;
 	uint32_t nexthop;
@@ -27,13 +27,15 @@ typedef struct {
 	uint32_t sensor;
 	uint16_t sensor_port;
 	uint32_t sequence;
+	char srcmac[6];
+	char dstmac[6];
 } flow_t;
 
 
-#define BUFFER_SIZE 4096
-
 flow_t *flow_buffer;
-uint16_t flow_in, flow_out;
+uint16_t flow_in;
+
+PGconn * postgres;
 
 void store() {
 	flow_in = 0;
@@ -41,8 +43,6 @@ void store() {
 	uv_buf_t buf;
 	buf = uv_buf_init(malloc(size), size);
 	memcpy ( buf.base, &flow_buffer, size);
-
-
 
 }
 
@@ -151,6 +151,7 @@ void parse_five(const struct uv_buf_t *buf, const struct sockaddr *addr) {
     fprintf(stderr, "%d: %d\n", i, data.srcaddr);
 		#endif
 
+
 	};
 
 }
@@ -187,11 +188,23 @@ void recv_cb(struct uv_udp_s *handle, long int nread, const struct uv_buf_t *buf
 //    uv_udp_send(req, handle, &ans, 1, addr, send_cb);
 }
 
+int postgres_connect() {
+	postgres = PQsetdbLogin("localhost","5432","","","billing","postgres","");
+    if (PQstatus(conn) != CONNECTION_OK)
+    {
+        fprintf(stderr, "Connection to database failed: %s",
+                PQerrorMessage(conn));
+        exit_nicely(conn);
+    }
+	return 0;
+}
+
+
 int main(int argc, char **argv)
 {
-
+	postgres_connect();
 	flow_buffer = malloc(sizeof(flow_t)*BUFFER_SIZE);
-	flow_in=0; flow_out=0;
+	flow_in=0;
 
 	uv_udp_t socket;
 	struct sockaddr_in addr;
