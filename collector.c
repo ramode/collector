@@ -2,14 +2,68 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <uv.h>
 
 #include <libpq-fe.h>
 
-#define DEBUG
+#define DEBUG 1
 #define NETFLOW5 5
-#define BUFFER_SIZE 256
+#define BUFFER_SIZE 4
+
+
+static char COPY_HEAD[19] = {0x50, 0x47, 0x43, 0x4f, 0x50, 0x59, 0x0a, 0xff, 0x0d, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+static char COPY_ROW[146] = {
+ 0x00, 0x11,
+ 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x08, 0x02, 0x20, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x08, 0x02, 0x20, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x08, 0x02, 0x20, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x08, 0x02, 0x20, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+ 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static char COPY_IP4[8] = {0, 0, 0, 0x08, 0x02, 0x20, 0, 0x04 };
+static char COPY_NULL[4] = {0xff, 0xff, 0xff, 0xff};
+static char COPY_END[2] = {0xff, 0xff};
+
+typedef struct {
+	char srcaddr[4];
+	char dstaddr[4];
+	char nexthop[4];
+	char input[2];
+	char output[2];
+	char pkts[4];
+	char octets[4];
+	char first[4];
+	char last[4];
+	char sport[2];
+	char dport[2];
+	char prot;
+	char sensor[4];
+	char sensor_port[2];
+	char sequence[4];
+	char srcmac[6];
+	char dstmac[6];
+} flow_t;
+
+typedef struct {
+	uint16_t head;
+	uint32_t tail;
+} mac_t;
+
 
 typedef struct {
 	uint32_t srcaddr;
@@ -27,30 +81,196 @@ typedef struct {
 	uint32_t sensor;
 	uint16_t sensor_port;
 	uint32_t sequence;
-	char srcmac[6];
-	char dstmac[6];
-} flow_t;
+	mac_t srcmac;
+	mac_t dstmac;
+} flow_uint_t;
 
 
-flow_t *flow_buffer;
+typedef struct {
+uint32_t p1;
+	uint16_t input;
+uint32_t p2;
+	uint16_t output;
+uint32_t p3;
+	uint32_t pkts;
+uint32_t p4;
+	uint32_t octets;
+uint32_t p5;
+	uint32_t first;
+uint32_t p6;
+	uint32_t last;
+uint32_t p7;
+	uint16_t sport;
+uint32_t p8;
+	uint16_t dport;
+uint32_t p9;
+	uint8_t prot_pad;
+	uint8_t prot;
+uint32_t p10;
+	uint16_t sensor_port;
+uint32_t p11;
+	uint32_t sequence;
+uint32_t p12;
+	uint8_t sensor_type;
+	uint8_t sensor_mask;
+	uint16_t sensor_version;
+	uint32_t sensor;
+uint32_t p13;
+	uint8_t srcaddr_type;
+	uint8_t srcaddr_mask;
+	uint16_t srcaddr_version;
+	uint32_t srcaddr;
+uint32_t p14;
+	uint8_t dstaddr_type;
+	uint8_t dstaddr_mask;
+	uint16_t dstaddr_version;
+	uint32_t dstaddr;
+uint32_t p15;
+	uint8_t nexthop_type;
+	uint8_t nexthop_mask;
+	uint16_t nexthop_version;
+	uint32_t nexthop;
+uint32_t p16;
+	mac_t srcmac;
+uint32_t p17;
+	mac_t dstmac;
+} pgrow;
+
+flow_uint_t *flow_buffer;
 uint16_t flow_in;
 
 PGconn * postgres;
 
+
+void hexDump (char *desc, void *addr, int len) {
+    int i;
+    unsigned char buff[17];
+    unsigned char *pc = (unsigned char*)addr;
+
+    // Output description if given.
+    if (desc != NULL)
+        printf ("%s:\n", desc);
+
+    if (len == 0) {
+        printf("  ZERO LENGTH\n");
+        return;
+    }
+    if (len < 0) {
+        printf("  NEGATIVE LENGTH: %i\n",len);
+        return;
+    }
+
+    // Process every byte in the data.
+    for (i = 0; i < len; i++) {
+        // Multiple of 16 means new line (with line offset).
+
+        if ((i % 16) == 0) {
+            // Just don't print ASCII for the zeroth line.
+            if (i != 0)
+                printf ("  %s\n", buff);
+
+            // Output the offset.
+            printf ("  %04x ", i);
+        }
+
+        // Now the hex code for the specific character.
+        printf (" %02x", pc[i]);
+
+        // And store a printable ASCII character for later.
+        if ((pc[i] < 0x20) || (pc[i] > 0x7e))
+            buff[i % 16] = '.';
+        else
+            buff[i % 16] = pc[i];
+        buff[(i % 16) + 1] = '\0';
+    }
+
+    // Pad out last line if not exactly 16 characters.
+    while ((i % 16) != 0) {
+        printf ("   ");
+        i++;
+    }
+
+    // And print the final ASCII bit.
+    printf ("  %s\n", buff);
+}
+
+
+static void
+exit_nicely(PGconn *conn)
+{
+    PQfinish(conn);
+    exit(1);
+}
+
+
 void store() {
-	flow_in = 0;
-	uint16_t size = sizeof(flow_t)*flow_in;
-	uv_buf_t buf;
-	buf = uv_buf_init(malloc(size), size);
-	memcpy ( buf.base, &flow_buffer, size);
+	PGresult   *res;
+
+	uint16_t size = 146*flow_in+19+2;
+
+	//uv_buf_t buf;
+	//buf = uv_buf_init(malloc(size), size);
+	//memcpy ( buf.base, &flow_buffer, size);
+
+	char *pgbuffer= (char*) malloc(size);
+	memset(pgbuffer,0,size);
+	char *p;
+	p=pgbuffer;
+	memcpy( pgbuffer,&COPY_HEAD,19);
+	p+=19;
+
+	for (uint16_t i=0; flow_in > i ;i++) {
+		memcpy(p,&COPY_ROW,146);
+
+		pgrow *row;
+		row=(pgrow *) p+2;
+
+		row->input = flow_buffer[i].input;
+		row->output = flow_buffer[i].output;
+		row->pkts = flow_buffer[i].pkts;
+		row->octets = flow_buffer[i].octets;
+		row->first = flow_buffer[i].first;
+		row->last = flow_buffer[i].last;
+		row->sport = flow_buffer[i].sport;
+		row->dport = flow_buffer[i].dport;
+		row->prot = flow_buffer[i].prot;
+		row->sensor_port = flow_buffer[i].sensor_port;
+		row->sequence = flow_buffer[i].sequence;
+
+		row->sensor = flow_buffer[i].sensor;
+		row->dstaddr = flow_buffer[i].dstaddr;
+		row->srcaddr = flow_buffer[i].srcaddr;
+
+		row->srcmac = flow_buffer[i].srcmac;
+		row->dstmac = flow_buffer[i].dstmac;
+		/*
+		memcpy(p+6, &flow_buffer[i].input, 2);
+		memcpy(p+12, &flow_buffer[i].output, 2);
+		memcpy(p+18, &flow_buffer[i].pkts, 4);
+		memcpy(p+26, &flow_buffer[i].octets, 4);
+		memcpy(p+34, &flow_buffer[i].first, 4);
+		memcpy(p+42, &flow_buffer[i].last, 4);
+		*/
+		//hexDump("addr",&flow_buffer[i].srcaddr,4);
+
+		p+=146;
+	}
+
+	flow_in=0;
+	memcpy(p, &COPY_END, 2);
+
+	hexDump("f",pgbuffer,size);
+
+	res = PQexec(postgres, "COPY collector FROM STDIN WITH (FORMAT binary)");
+	if (PQresultStatus(res) == PGRES_COPY_IN ) {
+
+		PQputCopyData(postgres,pgbuffer,size);
+		PQputCopyEnd(postgres,NULL);
+	};
+	PQendcopy(postgres);
 
 }
 
-void save(flow_t *flow) {
-	flow_buffer[flow_in] = *flow;
-	if (++flow_in == BUFFER_SIZE)
-		store();
-}
 
 
 void alloc_cb(uv_handle_t *handle, size_t size, uv_buf_t *buf)
@@ -73,7 +293,7 @@ struct nf5header {
 #define nf5data_size 48
 
 struct nf5data {
-  uint32_t srcaddr;
+  char srcaddr[4];
   uint32_t dstaddr;
   uint32_t nexthop;
   uint16_t input;
@@ -104,52 +324,47 @@ void parse_five(const struct uv_buf_t *buf, const struct sockaddr *addr) {
 //	memcpy(head, buf->base,sizeof(nf5header));
 
 	struct nf5header *nhead = (struct nf5header *) buf->base;
+	uint32_t delta = ntohl(nhead->timestamp)*1000 + ntohl(nhead->nanosecs)/1000000 - ntohl(nhead->uptime);
 
-	struct nf5header head = {
-		.version = ntohs(nhead->version),
-		.count = ntohs(nhead->count),
-		.uptime = ntohl(nhead->uptime),
-		.timestamp = ntohl(nhead->timestamp),
-		.nanosecs = ntohl(nhead->nanosecs),
-		.sequence = ntohl(nhead->sequence)
-	};
+	fprintf(stderr, "%d/n",delta);
 
-
-
-#ifdef DEBUG
-    fprintf(stderr, "nf %d %d %d %d %d\n", head.version, head.count, head.uptime, head.timestamp , head.sequence);
-#endif
-
-	for (uint16_t i=0; i<head.count; i++) {
+	for (uint16_t i=0; i<ntohs(nhead->count); i++) {
 		struct nf5data *ndata = (struct nf5data *) (buf->base+nf5header_size+nf5data_size*i);
-		struct nf5data data = {
-			.srcaddr=ntohl(ndata->srcaddr),
-			.dstaddr=ntohl(ndata->dstaddr),
-			.nexthop=ntohl(ndata->nexthop),
-			.input=ntohs(ndata->input),
-			.output=ntohs(ndata->output),
-			.dPkts=ntohl(ndata->dPkts),
-			.dOctets=ntohl(ndata->dOctets),
-			.first=ntohl(ndata->first),
-			.last=ntohl(ndata->last),
-			.srcport=ntohs(ndata->srcport),
-			.dstport=ntohs(ndata->dstport),
 
-			.pad1=0,
+		struct sockaddr_in * sensor = (struct sockaddr_in*) addr;
 
-			.tcp_flags=ndata->tcp_flags,
-			.prot=ndata->prot,
-			.tos=ndata->tos,
-			.src_as=ntohs(ndata->src_as),
-			.dst_as=ntohs(ndata->dst_as),
-			.src_mask=ndata->src_mask,
-			.dst_mask=ndata->dst_mask,
+		hexDump("addr",&ndata->srcaddr,4);
 
-			.pad2=0
-		};
-		#ifdef DEBUG
-    fprintf(stderr, "%d: %d\n", i, data.srcaddr);
-		#endif
+		uint32_t first = htonl((ntohl(ndata->first)+delta)/1000);
+		uint32_t last = htonl((ntohl(ndata->last)+delta)/1000);
+		uint32_t sequence = htonl(ntohl(nhead->sequence)+i);
+
+
+		flow_uint_t flow;
+
+	 memcpy(&flow.srcaddr,&ndata->srcaddr,4);
+	 memcpy(&flow.dstaddr,&ndata->dstaddr,4);
+	 memcpy(&flow.nexthop,&ndata->nexthop,4);
+	 memcpy(&flow.input,&ndata->input,2);
+	 memcpy(&flow.output,&ndata->output,2);
+	 memcpy(&flow.pkts,&ndata->dPkts,4);
+	 memcpy(&flow.octets,&ndata->dOctets,4);
+	 memcpy(&flow.first,&first,4);
+	 memcpy(&flow.last, &last, 4);
+	 memcpy(&flow.sport,&ndata->srcport,2);
+	 memcpy(&flow.dport,&ndata->dstport,2);
+	 memcpy(&flow.prot,&ndata->prot,1);
+	 memcpy(&flow.sensor,&sensor->sin_addr.s_addr,4);
+	 memcpy(&flow.sensor_port,&sensor->sin_port,2);
+	 memcpy(&flow.sequence, &sequence, 4);
+
+	 memset(&flow.srcmac,0,6);
+	 memset(&flow.dstmac,0,6);
+
+	flow_buffer[flow_in] = flow;
+	hexDump("addr", &flow.srcaddr,4);
+	if (++flow_in == BUFFER_SIZE)
+		store();
 
 
 	};
@@ -190,22 +405,25 @@ void recv_cb(struct uv_udp_s *handle, long int nread, const struct uv_buf_t *buf
 
 int postgres_connect() {
 	postgres = PQsetdbLogin("localhost","5432","","","billing","postgres","");
-    if (PQstatus(conn) != CONNECTION_OK)
-    {
-        fprintf(stderr, "Connection to database failed: %s",
-                PQerrorMessage(conn));
-        exit_nicely(conn);
-    }
+	if (PQstatus(postgres) != CONNECTION_OK)
+	{
+		fprintf(stderr, "Connection to database failed: %s", PQerrorMessage(postgres));
+		PQfinish(postgres);
+		return 1;
+	}
+	fprintf(stderr, "Connection to database OK\n");
 	return 0;
 }
 
 
 int main(int argc, char **argv)
 {
-	postgres_connect();
+
+	while(postgres_connect()>0) sleep(1) ;
+
 	flow_buffer = malloc(sizeof(flow_t)*BUFFER_SIZE);
 	flow_in=0;
-
+	fprintf(stderr, "Binding\n");
 	uv_udp_t socket;
 	struct sockaddr_in addr;
 	uv_udp_init(uv_default_loop(), &socket);
