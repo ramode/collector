@@ -1,8 +1,6 @@
 install: collector sql
-	cp ./collector ../bin/collector
-
-include ../deploy/postgres.mk
-
+	install --strip ./collector ../bin/collector
+	
 collector: collector.c
 	gcc -luv -lpq  collector.c -o collector
 
