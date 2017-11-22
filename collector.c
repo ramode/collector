@@ -341,7 +341,7 @@ void recv_cb(struct uv_udp_s *handle, long int nread, const struct uv_buf_t *buf
 }
 
 int postgres_connect() {
-	postgres = PQsetdbLogin("localhost","5432","","","billing","postgres","");
+	postgres = PQsetdbLogin("postgres","5432","","","billing","postgres","");
 	if (PQstatus(postgres) != CONNECTION_OK)
 	{
 		fprintf(stderr, "Connection to database failed: %s", PQerrorMessage(postgres));
