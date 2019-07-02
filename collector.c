@@ -14,6 +14,8 @@
 #define NETFLOW5 5
 #define BUFFER_SIZE 1048576
 
+uv_loop_t *loop;
+
 
 #pragma pack(push,1)
 typedef struct {
@@ -162,6 +164,11 @@ exit_nicely(PGconn *conn)
 
 
 void store() {
+  
+  if (flow_in == 0 ) {
+    return;
+  }
+  
 	PGresult *res;
 	uint32_t size = 159*flow_in+19+2;
 
@@ -184,8 +191,6 @@ void store() {
 		memcpy(p,&COPY_ROW,sizeof(COPY_ROW));
 		p+=2;
 		pgrow * row = (pgrow*)p;
-		printf("row %d\n",row);
-
 
 		row->input = flow_buffer[i].input;
 		row->output = flow_buffer[i].output;
@@ -285,9 +290,6 @@ void parse_five(const struct uv_buf_t *buf, const struct sockaddr *addr) {
 	uint64_t delta = ((uint64_t) ntohl(nhead->timestamp) - 946684800)*1000000
 		+ ntohl(nhead->nanosecs)/1000
 		- ((uint64_t) ntohl(nhead->uptime))*1000;
-
-	fprintf(stderr, "%d\n",delta);
-
 	for (uint16_t i=0; i<ntohs(nhead->count); i++) {
 		struct nf5data *ndata = (struct nf5data *) (buf->base+nf5header_size+nf5data_size*i);
 		struct sockaddr_in * sensor = (struct sockaddr_in*) addr;
@@ -355,16 +357,25 @@ int postgres_connect() {
 
 int main(int argc, char **argv)
 {
+  
+  loop = uv_default_loop();
+  
 	while(postgres_connect()>0) sleep(1) ;
 	flow_buffer = malloc(sizeof(flow_t)*BUFFER_SIZE);
 	flow_in=0;
+  
 	uv_udp_t socket;
 	struct sockaddr_in addr;
-	uv_udp_init(uv_default_loop(), &socket);
+	uv_udp_init(loop, &socket);
 	uv_ip4_addr("0.0.0.0", 2055, &addr);
 	uv_udp_bind(&socket, (struct sockaddr *) &addr, 0);
 	uv_udp_recv_start(&socket, alloc_cb, recv_cb);
-	int r = uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+  
+  uv_timer_t timer_req;
+  uv_timer_init(loop, &timer_req);
+  uv_timer_start(&timer_req, store, 60000, 600000);
+  
+	int r = uv_run(loop, UV_RUN_DEFAULT);
 	free(flow_buffer);
 	return r;
 }
