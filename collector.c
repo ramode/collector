@@ -12,7 +12,7 @@
 
 #define DEBUG
 #define NETFLOW5 5
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE 1048576
 
 
 #pragma pack(push,1)
@@ -216,7 +216,7 @@ void store() {
 	p = NULL;
 
 	hexDump("f", pgbuffer, size);
-	res = PQexec(postgres, "COPY collector FROM STDIN WITH (FORMAT binary)");
+	res = PQexec(postgres, "COPY radius.collector FROM STDIN WITH (FORMAT binary)");
 	if (PQresultStatus(res) == PGRES_COPY_IN ) {
 		PQputCopyData(postgres, pgbuffer, size);
 		PQputCopyEnd(postgres, NULL);
@@ -341,7 +341,7 @@ void recv_cb(struct uv_udp_s *handle, long int nread, const struct uv_buf_t *buf
 }
 
 int postgres_connect() {
-	postgres = PQsetdbLogin("postgres","5432","","","billing","postgres","");
+	postgres = PQsetdbLogin("127.0.0.1","5432","","","spot6","radius","radpass");
 	if (PQstatus(postgres) != CONNECTION_OK)
 	{
 		fprintf(stderr, "Connection to database failed: %s", PQerrorMessage(postgres));
