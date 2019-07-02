@@ -8,9 +8,10 @@
 #include <uv.h>
 #include <libpq-fe.h>
 
+#ifdef DEBUG
 #include "hexdump.h"
+#endif
 
-#define DEBUG
 #define NETFLOW5 5
 #define BUFFER_SIZE 1048576
 
@@ -210,17 +211,18 @@ void store() {
 
 		row->srcmac = flow_buffer[i].srcmac;
 		row->dstmac = flow_buffer[i].dstmac;
-
+#ifdef DEBUG
 		hexDump("addr",row,157);
-
+#endif
 		p += 157;
 		row = NULL;
 	}
 	flow_in=0;
 	memcpy(p, &COPY_END, 2);
 	p = NULL;
-
+#ifdef DEBUG
 	hexDump("f", pgbuffer, size);
+#endif
 	res = PQexec(postgres, "COPY radius.collector FROM STDIN WITH (FORMAT binary)");
 	if (PQresultStatus(res) == PGRES_COPY_IN ) {
 		PQputCopyData(postgres, pgbuffer, size);
@@ -359,7 +361,9 @@ int main(int argc, char **argv)
 {
   
   loop = uv_default_loop();
-  
+  #ifdef DEBUG
+  fprintf(stderr, "DEBUG\n");
+  #endif
 	while(postgres_connect()>0) sleep(1) ;
 	flow_buffer = malloc(sizeof(flow_t)*BUFFER_SIZE);
 	flow_in=0;
@@ -376,6 +380,8 @@ int main(int argc, char **argv)
   uv_timer_start(&timer_req, store, 60000, 600000);
   
 	int r = uv_run(loop, UV_RUN_DEFAULT);
+
+  store();
 	free(flow_buffer);
 	return r;
 }
